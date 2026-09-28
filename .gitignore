@@ -1,0 +1,5 @@
+data/workflow.db
+data/workflow.db-shm
+data/workflow.db-wal
+__pycache__/
+*.pyc
