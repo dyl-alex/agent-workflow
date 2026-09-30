@@ -16,6 +16,7 @@ The installation directory of the `tickets` executable is not a project root.
 - Own the workflow transition out of `TESTING`.
 - Testing is not complete until the appropriate workflow CLI command succeeds.
 - After an unblock, continue testing when the workflow restores the ticket to `TESTING`.
+- When additional tests are necessary, choose them based on risk and behavioral coverage rather than test count or exhaustive permutations.
 
 ## Testing Workflow
 
@@ -50,6 +51,9 @@ has succeeded and the resulting ticket state has been verified.
 - Tests added or modified by the tester must verify existing ticket requirements, not redefine expected behavior.
 - Include any tester-authored test changes in testing evidence so the reviewer can distinguish them from developer-authored tests.
 - Do not directly edit workflow SQLite data.
+- Do not add tests merely to increase coverage or exhaustively enumerate low-risk behavior.
+- Do not duplicate behavior already adequately verified by existing tests.
+- Prefer the smallest set of additional tests necessary to independently verify the ticket's acceptance criteria and meaningful regression risks.
 
 ## Expected Inputs
 

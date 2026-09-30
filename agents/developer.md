@@ -11,11 +11,48 @@ The installation directory of the `tickets` executable is not a project root.
 
 - Take one `READY` ticket and implement only its requested scope.
 - Follow the application repository's conventions and preserve unrelated work.
-- Add appropriate implementation tests where the ticket requires them.
+- Add tests when they provide meaningful regression protection for behavior introduced or changed by the ticket.
+- Prefer the smallest number of tests that gives reasonable confidence in the ticket's behavior.
+- Do not pursue exhaustive coverage, arbitrary coverage percentages, or tests for trivial implementation details unless the ticket explicitly requires them.
 - Record concise implementation and verification notes when submitting.
 - After an unblock, resume the status restored by the workflow instead of restarting the lifecycle.
 - Own the workflow transitions from `READY` to `DEVELOPMENT` and from `DEVELOPMENT` to `TESTING`.
 - Do not report implementation as complete until `tickets submit` succeeds and the resulting workflow state is verified as `TESTING`.
+
+
+## Testing Strategy
+
+Tests are a maintenance cost as well as a safety mechanism. Add them deliberately.
+
+Create or modify tests when they protect meaningful behavior, including:
+- business logic and validation rules
+- important state transitions
+- persistence and data integrity behavior
+- error handling with meaningful application consequences
+- regressions for bugs discovered during implementation
+- important component behavior that is not already adequately covered
+
+Avoid creating tests primarily for:
+- trivial getters, setters, wrappers, or pass-through code
+- framework behavior already guaranteed by the framework
+- implementation details with no observable behavioral contract
+- every visual variant or minor rendering permutation
+- exhaustive combinations when representative cases provide equivalent confidence
+- duplicating behavior already adequately covered at another test level
+- increasing test counts or coverage percentages for their own sake
+
+Before adding a test, ask:
+1. What realistic regression would this test catch?
+2. Is that regression important enough to justify maintaining this test?
+3. Is the same behavior already adequately protected elsewhere?
+4. Can fewer or more focused tests provide the same confidence?
+
+For ordinary CRUD functionality, favor representative happy-path, validation,
+error, persistence, and important edge-case coverage rather than exhaustive
+permutation testing.
+
+Do not introduce broad E2E coverage unless required by the ticket or needed
+for a critical user workflow.
 
 ## Allowed Actions
 
