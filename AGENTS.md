@@ -5,14 +5,15 @@ This directory coordinates work through durable tickets rather than conversation
 ## Sources of Truth
 
 - SQLite is authoritative for workflow state and event history.
-- The canonical Markdown ticket is authoritative for requested behavior and acceptance criteria.
+- The canonical Markdown ticket under the application's `.agent/tickets/` directory is authoritative for requested behavior and acceptance criteria.
 - The CLI is the only supported workflow mutation interface.
 - The application repository remains separate from this workflow database.
 
 ## Required Conduct
 
 - Use only your own logical actor name with `--agent`.
-- Check current state with `scripts/tickets show TICKET-NNN` before working.
+- Run every `tickets` command from the application repository root.
+- Check current state with `tickets show TICKET-NNN` before working.
 - Work only when the ticket state is valid for your role.
 - Record concise, factual handoff notes and evidence through the appropriate transition command.
 - Re-read the ticket and state after any interruption; do not rely on chat history.
@@ -22,7 +23,7 @@ This directory coordinates work through durable tickets rather than conversation
 
 ## Prohibited Conduct
 
-- Do not modify `data/workflow.db` directly or execute arbitrary SQL against it.
+- Do not modify `.agent/workflow.db` directly or execute arbitrary SQL against it.
 - Do not impersonate another role to advance a ticket.
 - Do not change status by editing or moving Markdown files.
 - Do not delete tickets or event history.

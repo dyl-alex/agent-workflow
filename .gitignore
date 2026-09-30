@@ -1,5 +1,8 @@
 data/workflow.db
 data/workflow.db-shm
 data/workflow.db-wal
+.agent/workflow.db
+.agent/workflow.db-shm
+.agent/workflow.db-wal
 __pycache__/
 *.pyc

@@ -9,4 +9,4 @@ from workflow.cli import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(default_root=ROOT))
+    raise SystemExit(main(schema_path=ROOT / "schema" / "schema.sql"))

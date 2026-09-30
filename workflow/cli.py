@@ -20,10 +20,10 @@ class WorkflowArgumentParser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = WorkflowArgumentParser(prog="tickets", description="Manage the local ticket workflow")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
-    parser.add_argument("--root", type=Path, help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init", help="initialize the workflow database")
+    subparsers.add_parser("migrate", help="migrate legacy project-local workflow state into .agent")
 
     create = subparsers.add_parser("create", help="create a backlog ticket from a Markdown draft")
     create.add_argument("--file", type=Path, required=True)
@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None, *, default_root: Path | None = None) -> int:
+def main(argv: list[str] | None = None, *, schema_path: Path | None = None) -> int:
     arguments = list(argv) if argv is not None else sys.argv[1:]
     as_json = "--json" in arguments
     try:
@@ -67,8 +67,7 @@ def main(argv: list[str] | None = None, *, default_root: Path | None = None) -> 
     except WorkflowError as error:
         _print_error(error, as_json)
         return 2
-    root = args.root or default_root or Path.cwd()
-    service = WorkflowService(root)
+    service = WorkflowService(Path.cwd(), schema_path)
     try:
         result = _dispatch(service, args)
         _print_success(args.command, result, args.json)
@@ -86,6 +85,8 @@ def _dispatch(service: WorkflowService, args: argparse.Namespace) -> Any:
     if args.command == "init":
         service.init()
         return {"initialized": True, "database": str(service.database_path)}
+    if args.command == "migrate":
+        return service.migrate_legacy()
     if args.command == "create":
         return service.create(args.file, args.agent, args.priority)
     if args.command == "list":
@@ -127,6 +128,11 @@ def _print_success(command: str, result: Any, as_json: bool) -> None:
         print(result["content"], end="")
     elif command == "init":
         print(f"Initialized {result['database']}")
+    elif command == "migrate":
+        print(
+            f"Migrated {result['ticket_count']} tickets to {result['migrated_to']}; "
+            "legacy files retained"
+        )
     else:
         print(f"{result['ticket_id']} -> {result['status']}")
 

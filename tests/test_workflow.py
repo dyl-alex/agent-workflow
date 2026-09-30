@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,16 @@ from workflow.service import WorkflowError, WorkflowService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@contextlib.contextmanager
+def working_directory(path: Path):
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 def draft(title: str = "Example", dependencies: str = "None") -> str:
@@ -46,7 +58,7 @@ class WorkflowTestCase(unittest.TestCase):
         self.root = Path(self.temporary_directory.name)
         (self.root / "schema").mkdir()
         shutil.copyfile(PROJECT_ROOT / "schema" / "schema.sql", self.root / "schema" / "schema.sql")
-        self.service = WorkflowService(self.root)
+        self.service = WorkflowService(self.root, self.root / "schema" / "schema.sql")
         self.service.init()
 
     def tearDown(self) -> None:
@@ -89,12 +101,16 @@ class WorkflowTestCase(unittest.TestCase):
         self.assertEqual(ticket["ticket_id"], "TICKET-001")
         self.assertEqual(ticket["status"], "BACKLOG")
         self.assertEqual(ticket["priority"], "NORMAL")
-        self.assertTrue((self.root / "tickets" / "TICKET-001.md").exists())
+        self.assertTrue((self.root / ".agent" / "tickets" / "TICKET-001.md").exists())
+        self.assertEqual(
+            (self.root / ".agent" / ".gitignore").read_text(encoding="utf-8"),
+            "workflow.db\nworkflow.db-shm\nworkflow.db-wal\n",
+        )
         history = self.service.history("TICKET-001")
         self.assertEqual([(item["event"], item["agent"]) for item in history], [("CREATED", "project-manager")])
 
     def test_creation_collision_preserves_existing_document_and_rolls_back(self) -> None:
-        existing = self.root / "tickets" / "TICKET-001.md"
+        existing = self.root / ".agent" / "tickets" / "TICKET-001.md"
         existing.write_text("do not replace\n", encoding="utf-8")
         with self.assertRaises(WorkflowError) as caught:
             self.create()
@@ -125,7 +141,7 @@ class WorkflowTestCase(unittest.TestCase):
             self.create()
         self.assertEqual(caught.exception.code, "CREATE_FAILED")
         self.assertEqual(self.service.list(), [])
-        self.assertFalse((self.root / "tickets" / "TICKET-001.md").exists())
+        self.assertFalse((self.root / ".agent" / "tickets" / "TICKET-001.md").exists())
 
     def test_full_valid_lifecycle(self) -> None:
         ticket_id = self.create()["ticket_id"]
@@ -153,7 +169,7 @@ class WorkflowTestCase(unittest.TestCase):
     def test_transition_response_does_not_depend_on_document_after_ready(self) -> None:
         ticket_id = self.create()["ticket_id"]
         self.service.ready(ticket_id, "project-manager")
-        (self.root / "tickets" / f"{ticket_id}.md").unlink()
+        (self.root / ".agent" / "tickets" / f"{ticket_id}.md").unlink()
         result = self.service.start(ticket_id, "developer")
         self.assertEqual(result["status"], "DEVELOPMENT")
         self.assertEqual(self.service.history(ticket_id)[-1]["event"], "STARTED")
@@ -191,17 +207,38 @@ class WorkflowTestCase(unittest.TestCase):
             self.service.test_fail(ticket_id, "tester", " ")
         self.assertEqual(caught.exception.code, "MESSAGE_REQUIRED")
 
-    def test_blocking_restores_exact_previous_state(self) -> None:
-        ticket_id = self.create()["ticket_id"]
-        self.move_to_testing(ticket_id)
-        blocked = self.service.block(ticket_id, "tester", "Test environment unavailable")
-        self.assertEqual(blocked["status"], "BLOCKED")
-        self.assertEqual(blocked["blocked_from_status"], "TESTING")
-        self.assertEqual(blocked["assigned_to"], "tester")
-        restored = self.service.unblock(ticket_id, "human", "Environment restored")
-        self.assertEqual(restored["status"], "TESTING")
-        self.assertIsNone(restored["blocked_from_status"])
-        self.assertEqual(restored["assigned_to"], "tester")
+    def test_blocking_immediately_restores_every_previous_state(self) -> None:
+        actors = {
+            "BACKLOG": "project-manager",
+            "READY": "project-manager",
+            "DEVELOPMENT": "developer",
+            "TESTING": "tester",
+            "REVIEW": "reviewer",
+        }
+        for target_status, actor in actors.items():
+            with self.subTest(target_status=target_status):
+                ticket_id = self.create(draft(f"Blocked from {target_status}"))["ticket_id"]
+                if target_status != "BACKLOG":
+                    self.service.ready(ticket_id, "project-manager")
+                if target_status in {"DEVELOPMENT", "TESTING", "REVIEW"}:
+                    self.service.start(ticket_id, "developer")
+                if target_status in {"TESTING", "REVIEW"}:
+                    self.service.submit(ticket_id, "developer")
+                if target_status == "REVIEW":
+                    self.service.test_pass(ticket_id, "tester")
+
+                before = self.service._state(ticket_id)
+                blocked = self.service.block(ticket_id, actor, "Temporarily unavailable")
+                self.assertEqual(blocked["status"], "BLOCKED")
+                self.assertEqual(blocked["blocked_from_status"], target_status)
+                self.assertEqual(blocked["assigned_to"], before["assigned_to"])
+
+                restored = self.service.unblock(ticket_id, "human", "Available again")
+                self.assertEqual(restored, before)
+                self.assertEqual(
+                    [event["event"] for event in self.service.history(ticket_id)[-2:]],
+                    ["BLOCKED", "UNBLOCKED"],
+                )
 
     def test_done_ticket_cannot_be_blocked_or_reopened(self) -> None:
         ticket_id = self.create()["ticket_id"]
@@ -233,7 +270,7 @@ class WorkflowTestCase(unittest.TestCase):
         self.assertEqual(caught.exception.code, "UNKNOWN_DEPENDENCY")
 
         dependency = self.create(draft("Dependency"))["ticket_id"]
-        document_path = self.root / "tickets" / f"{dependent}.md"
+        document_path = self.root / ".agent" / "tickets" / f"{dependent}.md"
         document_path.write_text(
             document_path.read_text(encoding="utf-8").replace("- TICKET-999", f"- {dependency}"),
             encoding="utf-8",
@@ -268,18 +305,15 @@ class WorkflowTestCase(unittest.TestCase):
 
     def test_json_cli_errors_are_machine_readable(self) -> None:
         stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            result = main(
-                ["--json", "--root", str(self.root), "show", "bad-id"],
-                default_root=PROJECT_ROOT,
-            )
+        with working_directory(self.root), contextlib.redirect_stderr(stderr):
+            result = main(["--json", "show", "bad-id"], schema_path=self.service.schema_path)
         self.assertEqual(result, 1)
         self.assertIn('"code": "INVALID_TICKET_ID"', stderr.getvalue())
 
     def test_json_cli_usage_errors_are_machine_readable(self) -> None:
         stderr = io.StringIO()
-        with contextlib.redirect_stderr(stderr):
-            result = main(["--json", "show"], default_root=self.root)
+        with working_directory(self.root), contextlib.redirect_stderr(stderr):
+            result = main(["--json", "show"], schema_path=self.service.schema_path)
         self.assertEqual(result, 2)
         self.assertIn('"code": "USAGE_ERROR"', stderr.getvalue())
 
@@ -291,6 +325,70 @@ class WorkflowTestCase(unittest.TestCase):
         self.assertEqual([item["ticket_id"] for item in self.service.list("DEVELOPMENT")], [first])
         self.assertEqual([item["ticket_id"] for item in self.service.list(assigned_to="developer")], [first])
         self.assertEqual(self.service.get(second)["status"], "BACKLOG")
+
+    def test_migrate_legacy_state_into_agent_directory_without_deleting_source(self) -> None:
+        ticket_id = self.create()["ticket_id"]
+        self.service.ready(ticket_id, "project-manager")
+        legacy_data = self.root / "data"
+        legacy_tickets = self.root / "tickets"
+        legacy_data.mkdir()
+        shutil.move(self.service.database_path, legacy_data / "workflow.db")
+        shutil.move(self.service.tickets_path, legacy_tickets)
+        (self.service.workflow_path / ".gitignore").unlink()
+        self.service.workflow_path.rmdir()
+
+        result = self.service.migrate_legacy()
+
+        self.assertEqual(result["ticket_count"], 1)
+        self.assertTrue((legacy_data / "workflow.db").exists())
+        self.assertTrue((legacy_tickets / f"{ticket_id}.md").exists())
+        self.assertTrue((self.root / ".agent" / ".gitignore").exists())
+        self.assertEqual(self.service.get(ticket_id)["status"], "READY")
+
+    def test_cli_uses_current_project_for_identical_ticket_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as other_directory:
+            other_root = Path(other_directory)
+            other_service = WorkflowService(other_root, self.service.schema_path)
+            other_service.init()
+            first_id = self.create()["ticket_id"]
+            (other_root / "draft.md").write_text(draft("Other project"), encoding="utf-8")
+            second_id = other_service.create(other_root / "draft.md", "project-manager")["ticket_id"]
+            self.assertEqual(first_id, second_id)
+            self.service.ready(first_id, "project-manager")
+
+            command = [str(PROJECT_ROOT / "scripts" / "tickets"), "--json", "list"]
+            first = subprocess.run(command, cwd=self.root, check=True, text=True, capture_output=True)
+            second = subprocess.run(command, cwd=other_root, check=True, text=True, capture_output=True)
+
+            self.assertIn('"status": "READY"', first.stdout)
+            self.assertIn('"status": "BACKLOG"', second.stdout)
+
+            subprocess.run(
+                [str(PROJECT_ROOT / "scripts" / "tickets"), "start", first_id, "--agent", "developer"],
+                cwd=self.root,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(self.service.get(first_id)["status"], "DEVELOPMENT")
+            self.assertEqual(other_service.get(second_id)["status"], "BACKLOG")
+
+    def test_cli_init_creates_workflow_state_in_current_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as project_directory:
+            project_root = Path(project_directory)
+            result = subprocess.run(
+                [str(PROJECT_ROOT / "scripts" / "tickets"), "init"],
+                cwd=project_root,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            expected_database = project_root / ".agent" / "workflow.db"
+            self.assertTrue(expected_database.exists())
+            self.assertTrue((project_root / ".agent" / "tickets").is_dir())
+            self.assertTrue((project_root / ".agent" / ".gitignore").exists())
+            self.assertIn(str(expected_database), result.stdout)
 
 
 if __name__ == "__main__":

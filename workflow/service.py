@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .database import connect, initialize
+from .database import SCHEMA_VERSION, connect, initialize
 from .ticket_document import (
     TicketDocumentError,
     parse_document,
@@ -20,6 +21,7 @@ from .ticket_document import (
 
 ACTORS = {"project-manager", "developer", "tester", "reviewer", "human"}
 PRIORITIES = {"LOW", "NORMAL", "HIGH", "URGENT"}
+WORKFLOW_GITIGNORE = "workflow.db\nworkflow.db-shm\nworkflow.db-wal\n"
 ROLE_FOR_STATUS = {
     "BACKLOG": None,
     "READY": None,
@@ -42,18 +44,99 @@ class WorkflowError(Exception):
 
 
 class WorkflowService:
-    def __init__(self, root: Path):
-        self.root = Path(root)
-        self.database_path = self.root / "data" / "workflow.db"
-        self.schema_path = self.root / "schema" / "schema.sql"
-        self.tickets_path = self.root / "tickets"
+    def __init__(self, root: Path, schema_path: Path | None = None):
+        self.root = Path(root).resolve()
+        self.workflow_path = self.root / ".agent"
+        self.database_path = self.workflow_path / "workflow.db"
+        self.schema_path = schema_path or Path(__file__).resolve().parents[1] / "schema" / "schema.sql"
+        self.tickets_path = self.workflow_path / "tickets"
 
     def init(self) -> None:
         self.tickets_path.mkdir(parents=True, exist_ok=True)
         try:
+            self._write_workflow_gitignore()
             initialize(self.database_path, self.schema_path)
         except (OSError, sqlite3.Error, RuntimeError) as error:
             raise WorkflowError("INITIALIZATION_FAILED", str(error)) from error
+
+    def migrate_legacy(self) -> dict[str, Any]:
+        legacy_database = self.root / "data" / "workflow.db"
+        legacy_tickets = self.root / "tickets"
+        if not legacy_database.is_file() or not legacy_tickets.is_dir():
+            raise WorkflowError(
+                "LEGACY_WORKFLOW_NOT_FOUND",
+                "Expected legacy data/workflow.db and tickets/ in the current project",
+            )
+        if self.workflow_path.exists():
+            raise WorkflowError(
+                "MIGRATION_CONFLICT",
+                f"Migration destination already exists: {self.workflow_path}",
+            )
+
+        staging_path = Path(tempfile.mkdtemp(prefix=".agent.migrate.", dir=self.root))
+        try:
+            staging_tickets = staging_path / "tickets"
+            staging_tickets.mkdir()
+            (staging_path / ".gitignore").write_text(WORKFLOW_GITIGNORE, encoding="utf-8")
+            source = connect(legacy_database)
+            try:
+                versions = [row[0] for row in source.execute("SELECT version FROM schema_version")]
+                if versions != [SCHEMA_VERSION]:
+                    raise WorkflowError(
+                        "UNSUPPORTED_SCHEMA",
+                        f"Unsupported schema version(s): {versions}; expected [{SCHEMA_VERSION}]",
+                    )
+                ticket_ids = {
+                    row[0] for row in source.execute("SELECT ticket_id FROM tickets ORDER BY ticket_id")
+                }
+                destination = connect(staging_path / "workflow.db")
+                try:
+                    source.backup(destination)
+                finally:
+                    destination.close()
+            finally:
+                source.close()
+
+            document_ids: set[str] = set()
+            for path in legacy_tickets.glob("TICKET-*.md"):
+                try:
+                    document = parse_document(path.read_text(encoding="utf-8"), expect_canonical=True)
+                except (OSError, UnicodeError) as error:
+                    raise WorkflowError("DOCUMENT_READ_FAILED", str(error)) from error
+                except TicketDocumentError as error:
+                    raise WorkflowError("INVALID_DOCUMENT", str(error)) from error
+                if path.name != f"{document.ticket_id}.md":
+                    raise WorkflowError(
+                        "DOCUMENT_ID_MISMATCH",
+                        f"Document ID does not match filename: {path}",
+                    )
+                document_ids.add(document.ticket_id)
+                shutil.copy2(path, staging_tickets / path.name)
+
+            if ticket_ids != document_ids:
+                missing = sorted(ticket_ids - document_ids)
+                orphaned = sorted(document_ids - ticket_ids)
+                raise WorkflowError(
+                    "MIGRATION_STATE_MISMATCH",
+                    "Legacy database rows and ticket documents do not match",
+                    missing_documents=missing,
+                    orphaned_documents=orphaned,
+                )
+
+            staging_path.replace(self.workflow_path)
+        except WorkflowError:
+            shutil.rmtree(staging_path, ignore_errors=True)
+            raise
+        except (OSError, sqlite3.Error) as error:
+            shutil.rmtree(staging_path, ignore_errors=True)
+            raise WorkflowError("MIGRATION_FAILED", str(error)) from error
+
+        return {
+            "migrated_to": str(self.workflow_path),
+            "legacy_database_retained": str(legacy_database),
+            "legacy_tickets_retained": str(legacy_tickets),
+            "ticket_count": len(ticket_ids),
+        }
 
     def create(self, draft_path: Path, actor: str, priority: str = "NORMAL") -> dict[str, Any]:
         self._require_actor(actor, {"project-manager", "human"})
@@ -358,6 +441,11 @@ class WorkflowService:
             return connect(self.database_path)
         except sqlite3.Error as error:
             raise WorkflowError("DATABASE_ERROR", str(error)) from error
+
+    def _write_workflow_gitignore(self) -> None:
+        path = self.workflow_path / ".gitignore"
+        if not path.exists():
+            path.write_text(WORKFLOW_GITIGNORE, encoding="utf-8")
 
     def _ticket_row(self, connection: sqlite3.Connection, ticket_id: str) -> sqlite3.Row:
         self._validate_id(ticket_id)
